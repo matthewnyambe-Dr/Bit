@@ -1,0 +1,296 @@
+
+import { useState, useRef, useCallback } from "react";
+
+let JSZipCache = null;
+async function getJSZip() {
+  if (JSZipCache) return JSZipCache;
+  const mod = await import("https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm");
+  JSZipCache = mod.default;
+  return JSZipCache;
+}
+
+const GITHUB_API = "https://api.github.com";
+
+const PRESETS = {
+  "Flask App": `my-app/\n├── app.py\n├── routes.py\n├── payments.py\n├── mail_service.py\n├── database.py\n├── templates/\n│   ├── index.html\n│   ├── checkout.html\n│   ├── success.html\n│   ├── cancel.html\n│   └── error.html\n├── static/\n│   ├── style.css\n│   └── main.js\n├── Procfile\n├── requirements.txt\n├── .env.example\n└── .gitignore`,
+  "React App": `my-app/\n├── src/\n│   ├── App.jsx\n│   ├── main.jsx\n│   └── index.css\n├── public/\n│   └── index.html\n├── package.json\n├── vite.config.js\n└── .gitignore`,
+  "Next.js": `my-app/\n├── app/\n│   ├── layout.tsx\n│   ├── page.tsx\n│   └── globals.css\n├── components/\n├── lib/\n│   └── utils.ts\n├── public/\n├── package.json\n├── next.config.js\n└── .gitignore`,
+  "Python Package": `my-package/\n├── src/\n│   └── mypackage/\n│       ├── __init__.py\n│       └── core.py\n├── tests/\n│   └── test_core.py\n├── setup.py\n├── README.md\n└── .gitignore`,
+};
+
+function parseTree(text) {
+  const map = {};
+  const lines = text.split("\n").filter(l => l.trim());
+  if (!lines.length) return map;
+  const root = lines[0].trim().replace(/\/$/, "");
+  const pathStack = [root], depthStack = [0];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    const stripped = line.replace(/^[│├└─\s]*/, "").trim();
+    if (!stripped) continue;
+    const indent = line.search(/[^\s│├└─]/);
+    const name = stripped.replace(/\/$/, "");
+    const isDir = stripped.endsWith("/");
+    while (depthStack.length > 1 && depthStack[depthStack.length - 1] >= indent) {
+      depthStack.pop(); pathStack.pop();
+    }
+    const full = [...pathStack, name].join("/");
+    if (isDir) { pathStack.push(name); depthStack.push(indent); }
+    else { map[name] = full; }
+  }
+  return map;
+}
+
+function matchToTree(name, map) {
+  if (map[name]) return map[name];
+  for (const v of Object.values(map)) { if (v.endsWith("/" + name)) return v; }
+  return null;
+}
+
+function b64(u8) { let s = ""; for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]); return btoa(s); }
+function b64text(str) { return btoa(unescape(encodeURIComponent(str))); }
+const TEXTS = new Set(["py","js","ts","jsx","tsx","html","css","scss","md","txt","json","yml","yaml","xml","sh","env","toml","ini","cfg","rs","go","java","c","cpp","h","cs","php","rb","kt","sql","tf","gitignore","dockerfile","csv","log","example","procfile"]);
+const IMGS = new Set(["png","jpg","jpeg","gif","webp","svg","ico","bmp","avif"]);
+const ext = n => (n.split(".").pop() || "").toLowerCase();
+const isBin = n => !TEXTS.has(ext(n));
+const fmtSz = b => b < 1024 ? `${b}B` : b < 1048576 ? `${(b/1024).toFixed(1)}KB` : `${(b/1048576).toFixed(1)}MB`;
+const COLORS = {py:"#3572A5",js:"#f1e05a",ts:"#2b7489",jsx:"#61dafb",tsx:"#2b7489",html:"#e34c26",css:"#563d7c",md:"#083fa1",json:"#292929",sh:"#89e051",yml:"#cb171e",png:"#ff6b6b",jpg:"#ff6b6b",jpeg:"#ff6b6b",gif:"#ff9f43",svg:"#ffbe76",zip:"#fdcb6e"};
+const ICONS = {py:"🐍",js:"⚡",ts:"🔷",jsx:"⚛️",tsx:"⚛️",html:"🌐",css:"🎨",md:"📝",json:"📋",sh:"💻",yml:"⚙️",zip:"📦",png:"🖼️",jpg:"🖼️",jpeg:"🖼️",gif:"🖼️",webp:"🖼️",svg:"🎨",env:"🔐",example:"🔐",gitignore:"🚫",procfile:"⚙️"};
+const ic = n => ICONS[ext(n)] || "📄";
+const lc = n => COLORS[ext(n)] || "#6b7280";
+
+const INP = { background:"#0e0e11", border:"1px solid #1e1e26", borderRadius:"8px", padding:"9px 13px", fontSize:"0.82rem", color:"#e2e2e7", outline:"none", fontFamily:"'JetBrains Mono',monospace", width:"100%", transition:"border-color 0.2s" };
+const TAG = ({c="#1e1b4b",t="#818cf8",children}) => <span style={{fontSize:"0.62rem",padding:"2px 7px",borderRadius:"99px",background:c,color:t,fontFamily:"monospace",whiteSpace:"nowrap"}}>{children}</span>;
+const SEC = ({n,col,label}) => (
+  <div style={{display:"flex",alignItems:"center",gap:"8px",marginBottom:"12px"}}>
+    <div style={{width:"22px",height:"22px",borderRadius:"6px",background:col,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.62rem",color:"#e2e2e7",fontWeight:700,flexShrink:0}}>{n}</div>
+    <span style={{fontSize:"0.62rem",letterSpacing:"0.14em",color:"#44444e",textTransform:"uppercase"}}>{label}</span>
+  </div>
+);
+
+function FileRow({ file, selected, onToggle }) {
+  const e = ext(file.name);
+  return (
+    <div onClick={onToggle} style={{display:"flex",alignItems:"center",gap:"10px",padding:"8px 12px",background:selected?"#13131a":"#0c0c0e",border:`1px solid ${selected?"#3730a3":"#1c1c22"}`,borderRadius:"8px",cursor:"pointer",transition:"all 0.15s",userSelect:"none"}}
+      onMouseEnter={ev=>{if(!selected)ev.currentTarget.style.borderColor="#28282e"}}
+      onMouseLeave={ev=>{if(!selected)ev.currentTarget.style.borderColor="#1c1c22"}}>
+      <div style={{width:"2px",height:"30px",borderRadius:"1px",background:lc(file.name),flexShrink:0}}/>
+      <span style={{fontSize:"1rem",flexShrink:0}}>{ic(file.name)}</span>
+      <div style={{flex:1,minWidth:0}}>
+        <p style={{fontSize:"0.78rem",fontFamily:"'JetBrains Mono',monospace",color:"#d4d4d8",margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{file.name}</p>
+        <p style={{fontSize:"0.68rem",color:file.mapped?"#818cf8":"#52525b",margin:"2px 0 0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{file.mapped?"📐 ":""}{file.finalPath}</p>
+      </div>
+      <div style={{display:"flex",gap:"4px",alignItems:"center",flexShrink:0}}>
+        <TAG>{fmtSz(file.size)}</TAG>
+        {file.mapped && <TAG c="#1e1b4b" t="#818cf8">mapped</TAG>}
+        {file.fromZip && <TAG c="#1a1a10" t="#d4d478">zip</TAG>}
+      </div>
+      <div style={{width:"14px",height:"14px",borderRadius:"3px",border:`1px solid ${selected?"#6366f1":"#3f3f46"}`,background:selected?"#6366f1":"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.15s"}}>
+        {selected&&<span style={{color:"white",fontSize:"0.6rem",lineHeight:1}}>✓</span>}
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [token,setToken]       = useState("");
+  const [tokSt,setTokSt]       = useState("idle");
+  const [user,setUser]         = useState(null);
+  const [repos,setRepos]       = useState([]);
+  const [repo,setRepo]         = useState("");
+  const [branch,setBranch]     = useState("main");
+  const [msg,setMsg]           = useState("Upload via GitHubPusher");
+  const [mode,setMode]         = useState("tree");
+  const [treeText,setTreeText] = useState(PRESETS["Flask App"]);
+  const [treeMap,setTreeMap]   = useState(()=>parseTree(PRESETS["Flask App"]));
+  const [preset,setPreset]     = useState("Flask App");
+  const [rules,setRules]       = useState([{id:1,type:"ext",value:"html",folder:"templates"},{id:2,type:"ext",value:"css",folder:"static"},{id:3,type:"all",value:"",folder:""}]);
+  const rid = useRef(10);
+  const [files,setFiles]       = useState([]);
+  const [sel,setSel]           = useState(new Set());
+  const [drop,setDrop]         = useState(false);
+  const [log,setLog]           = useState([]);
+  const [pushing,setPushing]   = useState(false);
+
+  const hdrs = useCallback(()=>({Authorization:`token ${token}`,"Content-Type":"application/json",Accept:"application/vnd.github.v3+json"}),[token]);
+
+  function resolve(file, m, mp, rl) {
+    if (m==="tree") { const r=matchToTree(file.name,mp); return r||file.zipPath||file.name; }
+    if (m==="rules") { for(const rule of rl){const e=ext(file.name);const hit=(rule.type==="ext"&&rule.value&&e===rule.value.replace(/^\./,"").toLowerCase())||(rule.type==="name"&&rule.value&&file.name.toLowerCase().includes(rule.value.toLowerCase()))||(rule.type==="path"&&rule.value&&(file.zipPath||"").toLowerCase().includes(rule.value.toLowerCase()))||(rule.type==="all");if(hit)return rule.folder?`${rule.folder.replace(/\/+$/,"")}/${file.name}`:file.name;} return file.zipPath||file.name; }
+    return file.name;
+  }
+
+  async function connect() {
+    if(!token.trim()||tokSt==="validating") return;
+    setTokSt("validating");
+    try {
+      const r=await fetch(`${GITHUB_API}/user`,{headers:hdrs()});
+      if(!r.ok) throw new Error();
+      const u=await r.json(); setUser(u); setTokSt("ok");
+      const rr=await fetch(`${GITHUB_API}/user/repos?per_page=100&sort=updated`,{headers:hdrs()});
+      const rd=await rr.json(); setRepos(Array.isArray(rd)?rd:[]);
+    } catch { setTokSt("err"); setUser(null); }
+  }
+
+  function applyTree(text) {
+    setTreeText(text);
+    const mp=parseTree(text); setTreeMap(mp);
+    setFiles(prev=>prev.map(f=>({...f,finalPath:resolve(f,"tree",mp,rules),mapped:!!matchToTree(f.name,mp)})));
+  }
+
+  function recompute(m,mp,rl) {
+    setFiles(prev=>prev.map(f=>({...f,finalPath:resolve(f,m??mode,mp??treeMap,rl??rules),mapped:(m??mode)==="tree"&&!!matchToTree(f.name,mp??treeMap)})));
+  }
+
+  async function ingest(rawFiles) {
+    const JZ=await getJSZip(); const added=[];
+    for(const rf of rawFiles){
+      if(ext(rf.name)==="zip"){
+        const zip=await JZ.loadAsync(rf);
+        for(const [zp,entry] of Object.entries(zip.files)){
+          if(entry.dir) continue;
+          const name=zp.split("/").pop(); if(!name) continue;
+          const u8=await entry.async("uint8array");
+          const f={id:Math.random(),name,zipPath:zp,size:u8.length,binary:isBin(name),content:u8,fromZip:rf.name};
+          f.finalPath=resolve(f,mode,treeMap,rules); f.mapped=mode==="tree"&&!!matchToTree(name,treeMap);
+          added.push(f);
+        }
+      } else {
+        const u8=new Uint8Array(await rf.arrayBuffer());
+        const f={id:Math.random(),name:rf.name,zipPath:rf.name,size:u8.length,binary:isBin(rf.name),content:u8,fromZip:null};
+        f.finalPath=resolve(f,mode,treeMap,rules); f.mapped=mode==="tree"&&!!matchToTree(rf.name,treeMap);
+        added.push(f);
+      }
+    }
+    setFiles(prev=>{const ex=new Set(prev.map(f=>f.name));return[...prev,...added.filter(f=>!ex.has(f.name))];});
+    setSel(prev=>{const n=new Set(prev);added.forEach(f=>n.add(f.id));return n;});
+  }
+
+  async function push() {
+    if(!repo||sel.size===0||pushing) return;
+    setPushing(true); setLog([]);
+    const todo=files.filter(f=>sel.has(f.id)); const lg=[];
+    for(const file of todo){
+      try{
+        const encoded=file.binary?b64(file.content):b64text(new TextDecoder().decode(file.content));
+        const url=`${GITHUB_API}/repos/${user.login}/${repo}/contents/${file.finalPath}`;
+        let sha; const chk=await fetch(`${url}?ref=${branch}`,{headers:hdrs()});
+        if(chk.ok){const ex=await chk.json();sha=ex.sha;}
+        const body={message:msg,content:encoded,branch}; if(sha)body.sha=sha;
+        const res=await fetch(url,{method:"PUT",headers:hdrs(),body:JSON.stringify(body)});
+        if(!res.ok){const e=await res.json();throw new Error(e.message);}
+        lg.push({id:file.id,path:file.finalPath,msg:sha?"Updated":"Created",ok:true});
+      }catch(e){lg.push({id:file.id,path:file.finalPath,msg:e.message,ok:false});}
+      setLog([...lg]);
+    }
+    setPushing(false);
+  }
+
+  const done=log.length>0&&log.length===files.filter(f=>sel.has(f.id)).length;
+  const allSel=files.length>0&&sel.size===files.length;
+
+  return (
+    <div style={{minHeight:"100vh",background:"#080809",color:"#e2e2e7",fontFamily:"'JetBrains Mono',monospace"}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Bebas+Neue&display=swap');
+        *{box-sizing:border-box;margin:0;padding:0}
+        input::placeholder,textarea::placeholder{color:#2a2a35}
+        select option{background:#111113;color:#e2e2e7}
+        ::-webkit-scrollbar{width:3px;height:3px}::-webkit-scrollbar-thumb{background:#222228;border-radius:2px}
+        @keyframes fadeUp{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+        .fu{animation:fadeUp 0.28s ease forwards}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        .sp{display:inline-block;animation:spin 0.7s linear infinite}
+        input:focus,select:focus,textarea:focus{border-color:#5046e5!important;outline:none}
+      `}</style>
+
+      {/* Header */}
+      <div style={{borderBottom:"1px solid #13131a",padding:"14px 24px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,background:"rgba(8,8,9,0.96)",backdropFilter:"blur(12px)",zIndex:100}}>
+        <div style={{display:"flex",alignItems:"center",gap:"12px"}}>
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="#c9c9d4"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+          <span style={{fontFamily:"'Bebas Neue',sans-serif",fontSize:"1.35rem",letterSpacing:"0.1em"}}>GITHUB<span style={{color:"#6366f1"}}>PUSHER</span></span>
+          <TAG c="#1a1828" t="#818cf8">v4</TAG>
+        </div>
+        {user&&<div style={{display:"flex",alignItems:"center",gap:"8px"}} className="fu">
+          <img src={user.avatar_url} style={{width:"26px",height:"26px",borderRadius:"50%",border:"1px solid #222228"}} alt=""/>
+          <span style={{fontSize:"0.75rem",color:"#71717a"}}>{user.login}</span>
+          <TAG c="#052e16" t="#34d399">● live</TAG>
+        </div>}
+      </div>
+
+      <div style={{maxWidth:"720px",margin:"0 auto",padding:"28px 20px",display:"flex",flexDirection:"column",gap:"28px"}}>
+
+        {/* 1. Auth */}
+        <section className="fu">
+          <SEC n="1" col="#1a1828" label="GitHub Authentication"/>
+          <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:"8px"}}>
+            <input type="password" placeholder="Personal Access Token  (ghp_...)" value={token}
+              onChange={e=>{setToken(e.target.value);setTokSt("idle");setUser(null);}}
+              onKeyDown={e=>e.key==="Enter"&&connect()}
+              style={{...INP,borderColor:tokSt==="err"?"#ef4444":tokSt==="ok"?"#10b981":"#1e1e26"}}/>
+            <button onClick={connect} disabled={tokSt==="validating"||!token.trim()}
+              style={{padding:"9px 18px",background:"#5046e5",color:"white",borderRadius:"8px",border:"none",cursor:"pointer",fontSize:"0.82rem",fontWeight:600,opacity:(!token.trim()||tokSt==="validating")?0.4:1,transition:"background 0.2s",whiteSpace:"nowrap",fontFamily:"'JetBrains Mono',monospace"}}
+              onMouseEnter={e=>{if(token.trim())e.target.style.background="#4338ca"}}
+              onMouseLeave={e=>e.target.style.background="#5046e5"}>
+              {tokSt==="validating"?"…":"Connect"}
+            </button>
+          </div>
+          {tokSt==="err"&&<p style={{fontSize:"0.72rem",color:"#f87171",marginTop:"8px"}}>✗ Invalid token — needs <code style={{color:"#a5b4fc"}}>repo</code> scope</p>}
+          {tokSt==="ok"&&<p style={{fontSize:"0.72rem",color:"#34d399",marginTop:"8px"}}>✓ Connected as <strong>{user?.login}</strong> · {repos.length} repos loaded</p>}
+          {tokSt==="ok"&&(
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",marginTop:"10px"}} className="fu">
+              <select value={repo} onChange={e=>setRepo(e.target.value)} style={{...INP,gridColumn:"1/-1",color:repo?"#e2e2e7":"#52525b"}}>
+                <option value="">{repos.length?`Select repository (${repos.length} available)`:"Loading…"}</option>
+                {repos.map(r=><option key={r.id} value={r.name}>{r.name}{r.private?" 🔒":""}</option>)}
+              </select>
+              <input placeholder="Branch  (main)" value={branch} onChange={e=>setBranch(e.target.value)} style={INP}/>
+              <input placeholder="Commit message" value={msg} onChange={e=>setMsg(e.target.value)} style={INP}/>
+            </div>
+          )}
+        </section>
+
+        {/* 2. Structure */}
+        <section className="fu">
+          <SEC n="2" col="#1a1a10" label="File Structure Mode"/>
+          <div style={{display:"flex",gap:"6px",marginBottom:"16px",flexWrap:"wrap"}}>
+            {[["tree","📐 Tree Template"],["rules","⚙️ Extension Rules"],["flat","📄 Flat"]].map(([m,lbl])=>(
+              <button key={m} onClick={()=>{setMode(m);recompute(m,null,null);}}
+                style={{padding:"7px 14px",borderRadius:"8px",border:`1px solid ${mode===m?"#5046e5":"#1e1e26"}`,background:mode===m?"#1e1b4b":"#0e0e11",color:mode===m?"#a5b4fc":"#71717a",fontSize:"0.75rem",fontFamily:"'JetBrains Mono',monospace",cursor:"pointer",transition:"all 0.15s"}}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+
+          {mode==="tree"&&(
+            <div style={{display:"flex",flexDirection:"column",gap:"10px"}}>
+              <div style={{display:"flex",gap:"6px",flexWrap:"wrap"}}>
+                {[...Object.keys(PRESETS),"Custom"].map(p=>(
+                  <button key={p} onClick={()=>{setPreset(p);if(p!=="Custom")applyTree(PRESETS[p]);else setTreeText("my-project/\n├── ");}}
+                    style={{padding:"4px 12px",borderRadius:"6px",border:`1px solid ${preset===p?"#5046e5":"#1e1e26"}`,background:preset===p?"#1e1b4b":"#0e0e11",color:preset===p?"#a5b4fc":"#52525b",fontSize:"0.7rem",fontFamily:"'JetBrains Mono',monospace",cursor:"pointer",transition:"all 0.15s"}}>
+                    {p}
+                  </button>
+                ))}
+              </div>
+              <textarea value={treeText} onChange={e=>applyTree(e.target.value)} rows={9}
+                placeholder={`Paste your project tree:\n\nmy-app/\n├── app.py\n├── templates/\n│   └── index.html\n└── .gitignore`}
+                style={{...INP,resize:"vertical",lineHeight:1.8,whiteSpace:"pre",fontSize:"0.75rem"}}/>
+              <div style={{background:"#06060a",border:"1px solid #13131a",borderRadius:"8px",padding:"10px 14px"}}>
+                <p style={{fontSize:"0.65rem",color:"#3a3a42",marginBottom:"6px",letterSpacing:"0.1em"}}>PARSED — {Object.keys(treeMap).length} files mapped</p>
+                <div style={{display:"flex",flexWrap:"wrap",gap:"4px",maxHeight:"70px",overflowY:"auto"}}>
+                  {Object.entries(treeMap).map(([k,v])=>(
+                    <span key={k} style={{fontSize:"0.63rem",background:"#0e0e11",border:"1px solid #1a1a22",borderRadius:"4px",padding:"2px 6px",fontFamily:"monospace",color:"#52525b"}}>
+                      <span style={{color:"#818cf8"}}>{k}</span><span style={{color:"#333340"}}> → </span><span style={{color:"#34d399"}}>{v}</span>
+                    </span>
+                  ))}
+                  {!Object.keys(treeMap).length&&<span style={{fontSize:"0.7rem",color:"#2a2a35"}}>Nothing parsed yet</span>}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {mode==="rules"&&(
+            <div style={{display:"flex",flexDirection:"column",gap:"7px"}}>
+              <p style={{fontSize:"0.7rem",color:"#3a3a42",marginBottom:"4px"}}>Top → bottom. First match wins. <code style={{color:"#818cf8"}}>all</code> = catch-all.</p>
+              {rules.map((r,i)=>(
+                <div key={r.id} style={{display:"flex",gap:"6px",alignItems:"center",background:"#0e0e11",border:"1px solid #1c1c22",borderRadius:"8px",padding:"8px 10px"}}>
+                  <TAG c="#1e1b4b" t="#818cf8">#{i+
