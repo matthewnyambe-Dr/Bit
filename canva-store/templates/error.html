@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Error</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@400;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>body{background:#0a0a0f;color:#f5f0e8;font-family:'DM Sans',sans-serif;}</style>
+</head>
+<body class="min-h-screen flex items-center justify-center px-6">
+  <div style="max-width:400px;width:100%;text-align:center;">
+    <div style="font-size:48px;margin-bottom:20px;">⚠️</div>
+    <h1 style="font-family:'Playfair Display',serif;font-size:1.8rem;font-weight:700;margin-bottom:12px;">
+      Something went wrong
+    </h1>
+    <p style="color:#8a8490;margin-bottom:28px;">{{ message or "An unexpected error occurred. Please try again." }}</p>
+    <a href="{{ url_for('store.index') }}"
+       style="display:inline-block;background:linear-gradient(135deg,#c9a84c,#b8893a);
+              color:#0a0a0f;padding:12px 28px;border-radius:10px;
+              text-decoration:none;font-weight:600;">
+      Return to Store
+    </a>
+  </div>
+</body>
+</html>
